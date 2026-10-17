@@ -2520,6 +2520,7 @@ const RbMegaChain = (function () {
     // same — the engine assigns its own IDs during loadPreset. We capture
     // them via getChainState() right after loading.
     let _indexToSlotId = [];   // chain index → engine slotId
+    let _lastEffectiveChain = null;   // effective chain of the most recent _applyActiveTone
 
     function _settingOn() {
         // Master Rig Builder switch (Gear → "Rig Builder: ON/OFF"). When the
@@ -2818,15 +2819,16 @@ const RbMegaChain = (function () {
         }
     }
 
-    async function _applyActiveTone(activeToneKey) {
-        const api = _api();
-        if (!api || !_mega) return;
-        const tone = _findToneByKey(activeToneKey);
-        const toneIndex = tone && Array.isArray(_mega.tones) ? _mega.tones.indexOf(tone) : -1;
-        const segmentId = tone ? rbToneSegmentId(tone, toneIndex >= 0 ? toneIndex : 0) : '';
-        const chainSpec = (_mega.native_preset && _mega.native_preset.chain) || [];
+    // Compute the effective chain for a tone: every stage NOT belonging to the
+    // active tone (or the master pre/post) is bypassed (passthrough); master
+    // and active-tone slots keep their persisted bypass. Returns the tone, the
+    // idx → bypass map (for the setMultiBypass flip) and the effective chain
+    // (for the gain computations). Shared by _applyActiveTone and by the
+    // load-time gain target in buildForSong.
+    function _effectiveChainForTone(activeToneKey) {
+        const chainSpec = (_mega && _mega.native_preset && _mega.native_preset.chain) || [];
         const totalStages = chainSpec.length || 0;
-        if (!totalStages) return;
+        const tone = _findToneByKey(activeToneKey);
 
         // Build a map: idx → desired bypass. Default for every slot is
         // bypassed=true (passthrough). For master + active-tone slots,
@@ -2842,6 +2844,28 @@ const RbMegaChain = (function () {
         (_mega.master_pre_slots  || []).forEach(applyEntry);
         (_mega.master_post_slots || []).forEach(applyEntry);
         if (tone && Array.isArray(tone.slots)) tone.slots.forEach(applyEntry);
+
+        const effectiveChain = chainSpec.map((stage, idx) => {
+            const copy = Object.assign({}, stage, { bypassed: !!bypassByIdx[idx] });
+            const activeEntry = activeToneSlotByIdx.get(idx);
+            if (activeEntry) {
+                if (activeEntry.rs_gain != null) copy.rs_gain = activeEntry.rs_gain;
+                if (activeEntry.rs_gear != null) copy.rs_gear = activeEntry.rs_gear;
+                if (activeEntry.slot != null) copy.slot = activeEntry.slot;
+                if (activeEntry.type != null) copy.type = activeEntry.type;
+            }
+            return copy;
+        });
+        return { tone, bypassByIdx, effectiveChain, totalStages };
+    }
+
+    async function _applyActiveTone(activeToneKey) {
+        const api = _api();
+        if (!api || !_mega) return;
+        const { tone, bypassByIdx, effectiveChain, totalStages } = _effectiveChainForTone(activeToneKey);
+        if (!totalStages) return;
+        const toneIndex = tone && Array.isArray(_mega.tones) ? _mega.tones.indexOf(tone) : -1;
+        const segmentId = tone ? rbToneSegmentId(tone, toneIndex >= 0 ? toneIndex : 0) : '';
 
         // Only trust the audio-effects PROVIDER's segment activation when the chain
         // was ACTUALLY loaded through that provider. When we fell back to legacy
@@ -2876,17 +2900,11 @@ const RbMegaChain = (function () {
                 }
             });
         }
-        const effectiveChain = chainSpec.map((stage, idx) => {
-            const copy = Object.assign({}, stage, { bypassed: !!bypassByIdx[idx] });
-            const activeEntry = activeToneSlotByIdx.get(idx);
-            if (activeEntry) {
-                if (activeEntry.rs_gain != null) copy.rs_gain = activeEntry.rs_gain;
-                if (activeEntry.rs_gear != null) copy.rs_gear = activeEntry.rs_gear;
-                if (activeEntry.slot != null) copy.slot = activeEntry.slot;
-                if (activeEntry.type != null) copy.type = activeEntry.type;
-            }
-            return copy;
-        });
+        // Remember the active tone's effective chain: the post-load re-assert in
+        // buildForSong re-applies its gain after the executor's scheduled
+        // preload restore fires (that restore targets the LOAD-TIME chain gain
+        // and would otherwise overwrite this per-tone value).
+        _lastEffectiveChain = effectiveChain;
         await rbApplyChainInputDrive({ chain: effectiveChain });
         await rbStartFinalChainNormalizer(effectiveChain);
         try { await _pokeLevelerRelock(); } catch (_) {}
@@ -3111,6 +3129,21 @@ const RbMegaChain = (function () {
         //    load mute/fade, initial route gain, and startAudio. The legacy
         //    fallback still performs rbPreLoadMute immediately before its
         //    direct clearChain + loadPreset call.
+        // The executor ramps the chain gain back to `executorOptions.gains.chain`
+        // `holdMs` after the load resolves (schedulePreloadRestore). Computing
+        // that target on the FULL mega-chain counts every tone's NAMs (+2 dB per
+        // extra unique NAM) and the restore then re-imposes the inflated value
+        // over the per-tone gain _applyActiveTone sets right after load -- the
+        // "Rig tone crackles / too distorted" bug. (The AMP path loads a
+        // single-tone chain, so its load target is already per-tone and sounds
+        // correct.) Compute the load target on the EFFECTIVE chain of the tone
+        // that will be active at load -- highway-resolved, first tone as fallback,
+        // mirroring the initial apply below -- so the restore target matches.
+        const initialLoadKey = _resolveActiveToneKey();
+        const initialLoadTone = (Array.isArray(mega.tones) && mega.tones.length === 1)
+            ? mega.tones[0]
+            : (initialLoadKey ? _findToneByKey(initialLoadKey) : (mega.tones && mega.tones[0]));
+        const effectiveLoadChain = _effectiveChainForTone(initialLoadTone ? initialLoadTone.tone_key : null).effectiveChain;
         let loadedViaAudioEffects = false;
         try {
             const loaded = await rbLoadNativePresetPayload(api, mega, {
@@ -3118,7 +3151,7 @@ const RbMegaChain = (function () {
                 ref: 'song',
                 filename,
                 authorization: 'playback-session',
-                executorOptions: rbAudioEffectsLoadOptionsForChain(mega.native_preset.chain, { startAudio: true }),
+                executorOptions: rbAudioEffectsLoadOptionsForChain(effectiveLoadChain, { startAudio: true }),
             });
             loadedViaAudioEffects = !!loaded.viaAudioEffects;
             _loadedViaAudioEffects = loadedViaAudioEffects;   // module flag for _applyActiveTone
@@ -3212,6 +3245,22 @@ const RbMegaChain = (function () {
             ? mega.tones[0]
             : (initialKey ? _findToneByKey(initialKey) : null);
         await _applyActiveTone(initialTone ? initialTone.tone_key : null);
+        // The executor's scheduled preload restore fires `holdMs` after the load
+        // and ramps the chain gain to the LOAD-TIME target. If the highway
+        // resolves a different first tone than the load-time fallback, or the
+        // song switches tone inside that window, the restored value no longer
+        // matches the active tone. Re-assert the active tone's gain once the
+        // restore ramp has finished (holdMs + margin).
+        const restoreHoldMs = (typeof window.__rbMutePreLoadHold === 'number')
+            ? Math.max(20, window.__rbMutePreLoadHold | 0)
+            : 250 + 120 * Math.max(1, mega.native_preset.chain.length | 0);
+        setTimeout(() => {
+            if (!_active || !_mega) return;
+            const c = _lastEffectiveChain;
+            if (Array.isArray(c) && c.length) {
+                rbApplyChainOutputGain({ chain: c }).catch(() => {});
+            }
+        }, restoreHoldMs + 250);
         // The chain is fully loaded, VST params re-applied, and the active tone's
         // bypass is set — un-mute ONLY if a REAL tone is active. If the highway
         // wasn't ready (initialTone null → everything bypassed), STAY muted; the
@@ -3541,6 +3590,7 @@ const RbMegaChain = (function () {
         _pendingFilename = null;
         if (!silent) _lastError = null;
         _indexToSlotId = [];
+        _lastEffectiveChain = null;
         _emitState();
     }
 

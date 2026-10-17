@@ -1,5 +1,21 @@
 # Rig Builder — handoff doc
 
+> **Megachain gain fix — per-tone load target + post-restore re-assert
+> (2026-10-17, branch `fix/megachain-gain-and-persisted-mode`).** On mega-chain
+> songs the rig tone crackled / was too distorted. Root cause: the executor
+> ramps the chain gain back to `executorOptions.gains.chain` `holdMs` after
+> load (schedulePreloadRestore), and that target was computed on the FULL
+> mega-chain (every tone's NAMs — +2 dB per extra unique NAM), then re-imposed
+> over the per-tone gain `_applyActiveTone` sets right after load. (The AMP
+> path loads a single-tone chain, so its load target is already per-tone —
+> which is why AMP sounded correct.) Fix: new `_effectiveChainForTone()` helper
+> shared by `_applyActiveTone` and the load path — the effective chain bypasses
+> every stage that does not belong to the active tone — and the load target is
+> computed on the effective chain of the tone active at load (highway-resolved,
+> first tone as fallback). A one-shot re-assert of the active tone's gain fires
+> `holdMs + 250 ms` after load, covering the highway resolving a different
+> first tone than the load-time fallback. `_lastEffectiveChain` is reset in
+> `teardown()`. Pure JS — restart feedBack.
 > **Edit: non-recreated VSTs open their NATIVE window (2026-06-12, branch
 > `feat/amp-loudness-normalize`).** User: VSTs without an in-app recreation should
 > open the plugin's own window on Edit instead of generic synthesized sliders —

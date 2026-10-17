@@ -3829,6 +3829,12 @@ window.addEventListener('rig-builder:tones-state', () => rbInjectPlayerToneButto
         }
         if (s && typeof s.mega_chain_mode !== 'undefined') {
             window.__rbMegaChainSetting = !!s.mega_chain_mode;
+            // The Setup checkbox for this key was removed, so the persisted
+            // value alone was dead: mirror it onto the runtime kill-switch at
+            // boot so triggerBuild / the poll / buildForSong skip the mega-chain.
+            // The player "Rig Tones" button can still force it ON for the session
+            // (toggleEnabled deletes window.__rbMegaChain).
+            if (!window.__rbMegaChainSetting) window.__rbMegaChain = false;
             console.log(`[rig_builder mega-chain] boot setting=${window.__rbMegaChainSetting} (read from /settings)`);
             const cur = window.slopsmith && window.slopsmith.currentSong;
             const filename = cur && cur.filename;

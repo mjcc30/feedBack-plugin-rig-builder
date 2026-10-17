@@ -1,5 +1,14 @@
 # Rig Builder — handoff doc
 
+> **Mirror the persisted mega_chain_mode onto the runtime kill-switch at boot
+> (2026-10-17, branch `fix/megachain-gain-and-persisted-mode`).** The Setup
+> checkbox for `mega_chain_mode` was removed, so the persisted settings value
+> was dead: `window.__rbMegaChainSetting` was read from `/settings` but the
+> `window.__rbMegaChain = false` kill-switch was never set from it, and
+> triggerBuild / the poll / buildForSong kept using the mega-chain. Now a
+> persisted `mega_chain_mode: false` mirrors onto `window.__rbMegaChain = false`
+> at boot. The player "Rig Tones" button can still force it ON for the session
+> (`toggleEnabled` deletes `window.__rbMegaChain`). Pure JS — restart feedBack.
 > **Megachain gain fix — per-tone load target + post-restore re-assert
 > (2026-10-17, branch `fix/megachain-gain-and-persisted-mode`).** On mega-chain
 > songs the rig tone crackled / was too distorted. Root cause: the executor

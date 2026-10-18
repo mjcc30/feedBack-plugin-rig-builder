@@ -10504,6 +10504,34 @@ async function rbTeardownVstEditor(api) {
     }
 }
 
+// The standalone VST editor path (rbSafeLoadStandaloneVst ->
+// rbResetStandaloneVstHost) zeroes the engine's input/chain gains, sets the
+// monitor mute and clearChain()s the live rig -- and no code path restored
+// them, so the whole chain stayed dead until the user manually reloaded the
+// song. Rebuild the active chain (song mega-chain, else the idle default
+// tone) after a standalone editor session so the rig comes back on its own.
+async function rbRebuildChainAfterEditorSession(reason) {
+    try {
+        const filename = (window.slopsmith && window.slopsmith.currentSong && window.slopsmith.currentSong.filename)
+            || rbState.currentSongFile || '';
+        const mega = window.RbMegaChain;
+        if (filename && mega && typeof mega.settingOn === 'function' && mega.settingOn()) {
+            // buildForSong tears down the stale session itself: the editor nuke
+            // leaves the mega-chain's JS state active, which would otherwise
+            // make the 2 s poll skip the rebuild.
+            console.log('[rig_builder] rebuilding chain after VST editor session:', reason || '');
+            const ok = await mega.buildForSong(filename);
+            if (ok) return;
+        }
+    } catch (e) {
+        console.warn('[rig_builder] post-editor chain rebuild failed:', e);
+    }
+    try {
+        if (typeof rbReloadDefaultTone === 'function') await rbReloadDefaultTone();
+        if (typeof rbApplyChainInputDrive === 'function') await rbApplyChainInputDrive({});
+    } catch (_) {}
+}
+
 // Map a song-tone piece to the engine slot id of its stage WITHIN the currently
 // loaded preview chain, so editing tweaks the pedal in place (the whole chain
 // keeps playing) instead of loading an isolated, louder single copy. Returns
@@ -10687,6 +10715,10 @@ async function rbOnLeaveRigBuilder() {
                 try { await rbPreLoadMute(1, window.__rbPendingChainGainTarget); } catch (_) {}
                 await api.clearChain().catch(() => {});
             }
+            // The standalone editor left the engine muted with zeroed gains
+            // and an empty chain -- rebuild the active chain (song mega-chain,
+            // else the idle default tone) so the next screen has sound.
+            rbRebuildChainAfterEditorSession('leave-rig-builder').catch(() => {});
         }
     } finally {
         _rbLeaving = false;
@@ -11757,14 +11789,19 @@ async function rbLoadMasterChain() {
     }
     rbRenderMasterChain('pre');
     rbRenderMasterChain('post');
-    // Auto-open the first VST's inline UI so the user doesn't have to click
-    // "Edit VST" to see it (the engine hosts one VST editor at a time — pre wins).
-    rbMasterAutoOpenFirstVst().catch(() => {});
+    // NOTE: rbMasterAutoOpenFirstVst() is deliberately NOT called anymore.
+    // Opening a VST editor loads it standalone (rbSafeLoadStandaloneVst),
+    // which zeroes the engine gains, mutes the monitor and clearChain()s the
+    // live rig -- auto-opening on every Master-tab entry kept killing the
+    // user's chain. "Edit VST" stays a manual click; closing the editor
+    // rebuilds the chain (rbRebuildChainAfterEditorSession).
 }
 
 // Open the inline editor for the FIRST VST piece across the master chains without
 // a manual "Edit VST" click. Only ONE VST editor slot exists in the engine, so we
 // open a single one (pre chain has priority) and never steal one already open.
+// DISABLED as an automatic action (see the note in rbLoadMasterChain): opening
+// the editor tears the live chain down, so it must stay a deliberate click.
 async function rbMasterAutoOpenFirstVst() {
     if (rbState._vstEditorSlot != null || rbState._vstEditorBusy) return;
     for (const role of ['pre', 'post']) {
@@ -12190,6 +12227,10 @@ async function rbMasterEditVst(role, idx) {
         editor.innerHTML = '';
         await rbTeardownVstEditor(api);
         piece._vst_slot_id = null;
+        // The standalone editor cleared the engine chain and zeroed the gains
+        // (rbResetStandaloneVstHost) -- rebuild the active chain so the rig
+        // comes back instead of staying dead until a manual song reload.
+        rbRebuildChainAfterEditorSession('master-vst-editor-closed').catch(() => {});
         return;
     }
     await rbEnsureCustomUi(piece);   // custom gear → created UI, not the native window
@@ -19357,6 +19398,10 @@ async function rbRecoverFailedVstLoad(api, partialSlot = null) {
             await api.setGain('chain', 0.0);
         }
     } catch (_) {}
+
+    // The failed load left the host muted with zeroed gains and no chain --
+    // rebuild whatever was active before the editor attempt.
+    rbRebuildChainAfterEditorSession('vst-load-recovery').catch(() => {});
 }
 
 async function rbSafeLoadStandaloneVst(api, vstPath) {

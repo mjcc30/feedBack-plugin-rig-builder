@@ -12235,6 +12235,24 @@ async function rbAfterMasterEdit(role) {
     // If a tone preview is running, reload it so the new master wrap is heard live.
     if (rbState.listeningTone !== null && rbState._previewPayload?.id) {
         await rbReloadPreview(rbState._previewPayload.id).catch(() => {});
+        return;
+    }
+    // An audition owns the engine -- leave it alone.
+    if (rbState._auditionId || rbState._previewMode) return;
+    // No preview: reload whatever is actually playing so the edit (e.g. a
+    // newly added VST) is heard immediately -- previously the change sat on
+    // disk until an app restart or a manual tone switch.
+    const mega = window.RbMegaChain;
+    const filename = (window.slopsmith && window.slopsmith.currentSong && window.slopsmith.currentSong.filename)
+        || rbState.currentSongFile || '';
+    if (filename && mega && typeof mega.isActive === 'function' && mega.isActive()
+        && typeof mega.settingOn === 'function' && mega.settingOn()) {
+        // A song is playing through the mega-chain: rebuild it with the new
+        // master wrap.
+        await mega.buildForSong(filename).catch(() => {});
+    } else if (rbState._defaultToneActive) {
+        // Idle rig: the default tone wraps the master pre/post -- reload it.
+        await rbReloadDefaultTone().catch(() => {});
     }
 }
 

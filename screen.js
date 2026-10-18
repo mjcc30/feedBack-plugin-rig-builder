@@ -11209,7 +11209,15 @@ function rbCustomUiValues(piece) {
 // instead of generic synthesized sliders. Awaits so we can fall back cleanly.
 async function rbTryOpenNativeEditor(api, slotId) {
     if (!api || typeof api.openPluginEditor !== 'function' || slotId == null) return false;
-    try { await api.openPluginEditor(slotId); return true; }
+    try {
+        // openPluginEditor resolves FALSE when the engine has no editor for the
+        // slot (UI-less plugin, dead sandbox, stale slot id). Check it: this
+        // used to return true unconditionally, so the "Plugin window" button
+        // silently did nothing.
+        const ok = await api.openPluginEditor(slotId);
+        try { rbDebugLog('openPluginEditor result', { slotId, ok: !!ok }); } catch (_) {}
+        return !!ok;
+    }
     catch (e) { console.warn('[rig_builder] this plugin has no native editor window:', e); return false; }
 }
 
@@ -11233,6 +11241,21 @@ async function rbMasterOpenNativeWindow(role, idx) {
     const piece = rbState.master && rbState.master[role] && rbState.master[role][idx];
     if (!api || !piece) return;
     if (piece._vst_slot_id == null) { alert('Load the gear first (open its editor), then try again.'); return; }
+    // DIAG: dump the engine's view of this slot before asking for the native
+    // window — tells us whether the engine even knows an editor exists.
+    try {
+        const st = await api.getChainState();
+        const slots = Array.isArray(st) ? st : (st && Array.isArray(st.slots) ? st.slots : []);
+        const me = slots.find(s => s && (s.slotId != null ? s.slotId : s.id) === piece._vst_slot_id);
+        rbDebugLog('masterOpenNativeWindow slotState', {
+            slotId: piece._vst_slot_id,
+            found: !!me,
+            hasEditor: me ? !!me.hasEditor : null,
+            type: me ? (me.type || null) : null,
+            name: me ? (me.name || null) : null,
+            chainLen: slots.length,
+        });
+    } catch (e) { try { rbDebugLog('masterOpenNativeWindow slotState err', { err: String(e) }); } catch (_) {} }
     if (!(await rbTryOpenNativeEditor(api, piece._vst_slot_id))) {
         alert("This plugin has no native editor window (it's UI-less).");
         return;
@@ -12354,6 +12377,12 @@ async function rbRebuildActiveChainForMasterEdit() {
         } else {
             await rbReloadDefaultTone().catch(() => {});
         }
+    } else {
+        // Nothing is playing (no preview, no song, no active monitor). If a
+        // default tone is configured, load it so the editor attaches IN-CHAIN
+        // (the rig keeps sounding) instead of falling back to the muting
+        // standalone editor. rbReloadDefaultTone no-ops when unconfigured.
+        await rbReloadDefaultTone().catch(() => {});
     }
 }
 

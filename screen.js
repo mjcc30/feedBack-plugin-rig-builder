@@ -1831,6 +1831,12 @@ async function rbActivateSegmentWithHost(segmentId, toneKey) {
 }
 
 async function rbLoadNativePresetPayload(api, payload, options) {
+    // This load REPLACES the whole engine chain (clearChain + loadPreset, or
+    // the audio-effects executor's rebuild): any open VST editor points at a
+    // slot that load tears down — leaving it open crashes the host (same rule
+    // as rbStopPreview / rbShowTab). Close it first; that also flushes its
+    // pending master saves while its slot is still alive.
+    try { await rbCloseActiveVstEditor(); } catch (_) {}
     const ready = await rbEnsureNativeAudioReady(api, options);
     if (!ready.ok) throw new Error(ready.reason || 'Native audio input is not ready');
 
@@ -3585,6 +3591,10 @@ const RbMegaChain = (function () {
         _stopPolling();
         _stopAmpGuard();
         if (!silent) _restoreGuitarStem();
+        // The clearChain below tears down every engine slot — close any open VST
+        // editor first (same rule as rbStopPreview) or its slot is destroyed
+        // under the still-open editor and the host crashes.
+        try { if (typeof rbCloseActiveVstEditor === 'function') await rbCloseActiveVstEditor(); } catch (_) {}
         if (_active) {
             const api = _api();
             // Mute around the teardown: clearChain removes stages one by one
@@ -12349,6 +12359,11 @@ async function rbRebuildActiveChainForMasterEdit() {
 
 async function rbAfterMasterEdit(role) {
     rbDebugLog('afterMasterEdit', { role, count: (rbState.master[role] || []).length });
+    // The rebuild below reloads the live chain (clearChain + loadPreset): an
+    // open VST editor points at a slot that reload tears down — close it first
+    // or the host crashes (same rule as rbStopPreview). Also flushes the
+    // editor's pending saves while its slot is still alive.
+    try { await rbCloseActiveVstEditor(); } catch (_) {}
     await rbPersistMasterChain(role).catch(() => null);
     rbRenderMasterChain(role);
     if (role === 'default') {
@@ -17922,6 +17937,9 @@ async function rbCgApplyVstParamLayout(path) {
 async function rbCgFetchVstParams(vstPath) {
     const api = rbAudioApi();
     if (!api || typeof api.getParameters !== 'function' || typeof rbLoadVSTWhenReady !== 'function') return null;
+    // The clearChain below replaces the whole chain — close any open VST editor
+    // first (same rule as rbStopPreview) or its slot is torn down under it.
+    try { if (typeof rbCloseActiveVstEditor === 'function') await rbCloseActiveVstEditor(); } catch (_) {}
     try {
         if (api.clearChain) await api.clearChain();
         if (typeof api.startAudio === 'function') await api.startAudio().catch(() => {});
@@ -19665,7 +19683,24 @@ async function rbHardResetVstAudio(api) {
 async function rbResetStandaloneVstHost(api) {
     if (!api) return;
 
-    try { if (api.closePluginEditor && rbState._vstEditorSlot != null) await api.closePluginEditor(rbState._vstEditorSlot); } catch (_) {}
+    try {
+        if (api.closePluginEditor) {
+            if (rbState._vstEditorSlot != null) {
+                await api.closePluginEditor(rbState._vstEditorSlot);
+            } else if (typeof api.getChainState === 'function') {
+                // The editor-slot pointer can be lost while the native editor
+                // is still open (e.g. the master list re-rendered under it) —
+                // the clearChain below would then tear the slot down under the
+                // open editor and crash the host. Close every VST slot's editor.
+                const st = await api.getChainState().catch(() => null);
+                const slots = Array.isArray(st) ? st : (st && Array.isArray(st.slots) ? st.slots : []);
+                for (const s of slots) {
+                    const sid = s && (s.slotId != null ? s.slotId : s.id);
+                    if (sid != null && s.path) { try { await api.closePluginEditor(sid); } catch (_) {} }
+                }
+            }
+        }
+    } catch (_) {}
 
     rbState._vstEditorSlot = null;
     rbState._vstEditorInChain = false;

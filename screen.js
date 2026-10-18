@@ -5717,7 +5717,13 @@ async function rbStudioOpenNativeWindow() {
     if (!rbIsAddedVst(piece)) { alert("This is native gear — the real plugin window is only for gear you added as a VST."); return; }
     let slotId = piece._vst_slot_id;
     if (slotId == null) { try { slotId = await rbStudioChainSlotIdForPiece(api, idx); } catch (_) {} }
-    if (slotId == null) { alert('Load the gear first (it is still initialising), then try again.'); return; }
+    if (slotId == null) {
+        const bypassed = !!(piece._bypassed || (piece.assigned && piece.assigned.bypassed));
+        alert(bypassed
+            ? 'This gear is bypassed — it is not loaded in the engine, so there is no live slot to edit or open. Re-enable it to edit it live; edits made now apply on the next chain reload.'
+            : 'Load the gear first (it is still initialising), then try again.');
+        return;
+    }
     if (!(await rbTryOpenNativeEditor(api, slotId))) {
         alert("This plugin has no native editor window (it's UI-less).");
         return;
@@ -11243,10 +11249,12 @@ async function rbMasterOpenNativeWindow(role, idx) {
     if (piece._vst_slot_id == null) { alert('Load the gear first (open its editor), then try again.'); return; }
     // DIAG: dump the engine's view of this slot before asking for the native
     // window — tells us whether the engine even knows an editor exists.
+    let slotHasEditor = null;
     try {
         const st = await api.getChainState();
         const slots = Array.isArray(st) ? st : (st && Array.isArray(st.slots) ? st.slots : []);
         const me = slots.find(s => s && (s.slotId != null ? s.slotId : s.id) === piece._vst_slot_id);
+        slotHasEditor = me ? !!me.hasEditor : null;
         rbDebugLog('masterOpenNativeWindow slotState', {
             slotId: piece._vst_slot_id,
             found: !!me,
@@ -11257,7 +11265,9 @@ async function rbMasterOpenNativeWindow(role, idx) {
         });
     } catch (e) { try { rbDebugLog('masterOpenNativeWindow slotState err', { err: String(e) }); } catch (_) {} }
     if (!(await rbTryOpenNativeEditor(api, piece._vst_slot_id))) {
-        alert("This plugin has no native editor window (it's UI-less).");
+        alert(slotHasEditor === false
+            ? "No native window for this plugin — the engine reports no editor for its slot. If it also stopped producing sound, the plugin's audio sandbox has crashed: reload the tone/song (or pick another plugin). The in-app editor stays usable."
+            : "This plugin has no native editor window (it's UI-less).");
         return;
     }
     rbStartNativeParamSync(api, piece._vst_slot_id, piece);
@@ -21475,7 +21485,13 @@ async function rbAdvOpenNativeWindow() {
     if (!rbIsAddedVst(piece)) { alert("This is native gear — the real plugin window is only for gear you added as a VST."); return; }
     let slotId = piece._vst_slot_id;
     if (slotId == null) { try { slotId = await rbStudioChainSlotIdForPiece(api, idx); } catch (_) {} }
-    if (slotId == null) { alert('Load the gear first (it is still initialising), then try again.'); return; }
+    if (slotId == null) {
+        const bypassed = !!(piece._bypassed || (piece.assigned && piece.assigned.bypassed));
+        alert(bypassed
+            ? 'This gear is bypassed — it is not loaded in the engine, so there is no live slot to edit or open. Re-enable it to edit it live; edits made now apply on the next chain reload.'
+            : 'Load the gear first (it is still initialising), then try again.');
+        return;
+    }
     if (!(await rbTryOpenNativeEditor(api, slotId))) { alert("This plugin has no native editor window (it's UI-less)."); return; }
     rbStartNativeParamSync(api, slotId, piece);
 }

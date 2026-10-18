@@ -12303,6 +12303,14 @@ function rbMasterToggleBypass(role, idx, btn) {
 // falling back to the muting standalone editor — retry the in-chain match
 // against a fresh spec first).
 async function rbRebuildActiveChainForMasterEdit() {
+    rbDebugLog('rebuildActiveChain enter', {
+        listeningTone: rbState.listeningTone,
+        hasPreviewPayload: !!(rbState._previewPayload && rbState._previewPayload.id),
+        audition: !!rbState._auditionId,
+        previewMode: rbState._previewMode || null,
+        defaultToneActive: !!rbState._defaultToneActive,
+        studioView: rbState.studioView ? rbState.studioView.source : null,
+    });
     // If a tone preview is running, reload it so the new master wrap is heard live.
     if (rbState.listeningTone !== null && rbState._previewPayload?.id) {
         await rbReloadPreview(rbState._previewPayload.id).catch(() => {});
@@ -12323,7 +12331,19 @@ async function rbRebuildActiveChainForMasterEdit() {
         await mega.buildForSong(filename).catch(() => {});
     } else if (rbState._defaultToneActive) {
         // Idle rig: the default tone wraps the master pre/post -- reload it.
-        await rbReloadDefaultTone().catch(() => {});
+        // A Studio monitor (a saved/song tone loaded as the idle monitor)
+        // ALSO wraps the master chain, so re-run the studio monitor load:
+        // rbReloadDefaultTone alone no-ops (and clears the flag) when the
+        // default tone isn't configured, which left the engine chain without
+        // the new master wrap -- Edit VST then found no live slot and fell
+        // back to the muting standalone editor.
+        if (typeof rbStudioLoadMonitor === 'function') {
+            rbDebugLog('rebuildActiveChain studioMonitor', {
+                source: rbState.studioView ? rbState.studioView.source : null });
+            await rbStudioLoadMonitor().catch(() => {});
+        } else {
+            await rbReloadDefaultTone().catch(() => {});
+        }
     }
 }
 

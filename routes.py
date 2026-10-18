@@ -8478,18 +8478,6 @@ def setup(app, context):
 
     # ── Status / setup ────────────────────────────────────────────────
 
-    @app.post("/api/plugins/rig_builder/debug_log")
-    async def debug_log(request: Request):
-        # Frontend diagnostics relay: the renderer's console isn't visible when
-        # the app runs from a terminal, but this server's stdout is (the main
-        # process echoes it as [python:stdout]). Print-and-forget.
-        try:
-            body = await request.json()
-            print(f"[rb-debug] {str(body.get('msg', ''))[:2000]}", flush=True)
-        except Exception:
-            pass
-        return {"ok": True}
-
     # ── Plugin self-update (Setup → Rig Builder version) ────────────────────
     # Self-contained: reads its own version from plugin.json and the latest from
     # GitHub raw, and updates via `git` when this copy is a clone. Does NOT depend
@@ -8954,9 +8942,11 @@ def setup(app, context):
     @app.post("/api/plugins/rig_builder/debug_log")
     def debug_log(data: dict = Body(...)):
         """Client trace mirror: the renderer POSTs {msg, data} here
-        fire-and-forget; the backend appends it to rb-debug.log."""
+        fire-and-forget; the backend appends it to rb-debug.log and echoes
+        to stdout as a fallback so traces survive file-write issues."""
         try:
             _rb_debug_log("client " + str(data.get("msg") or ""), data.get("data"))
+            print(f"[rb-debug] client {str(data.get('msg') or '')[:2000]}", flush=True)
         except Exception:
             pass
         return {"ok": True}

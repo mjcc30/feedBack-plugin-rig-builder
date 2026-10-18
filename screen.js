@@ -10614,7 +10614,12 @@ async function rbChainSlotIdForPiece(api, payload, toneIdx, pIdx) {
 // The engine's loaded slots are index-aligned with that spec (getChainState,
 // the same alignment the mega-chain's _indexToSlotId capture uses); each slot
 // carries its VST `path`, cross-checked before the id is returned so a stale
-// spec can never hand out a wrong slot.
+// spec can never hand out a wrong slot. When the spec can't produce a
+// verified slot (stale spec, index drift from a partial load, leftover
+// slots), a DIRECT match on the live getChainState() slots by VST path takes
+// over — via the audio-effects plan those slots are named "master-post-vst" /
+// "master-pre-vst", which tags master stages unambiguously; without tags the
+// path match alone still finds the plugin.
 async function rbMasterChainSlotIdForPiece(api, role, idx) {
     try {
         if (!api || typeof api.getChainState !== 'function') return null;
@@ -10623,10 +10628,9 @@ async function rbMasterChainSlotIdForPiece(api, role, idx) {
         if (!piece) return null;
         const effPath = rbEffVstPath(piece);
         if (!effPath) return null;
-        const chain = rbState._rbLastChainSpec;
-        if (!Array.isArray(chain) || !chain.length) return null;
         const norm = (p) => String(p || '').replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
         const want = norm(effPath);
+        const wantName = want.split(/[\/]/).pop();
         const slotPrefix = role === 'pre' ? 'master_pre:'
             : role === 'post' ? 'master_post:'
             : 'master_default';
@@ -10637,37 +10641,93 @@ async function rbMasterChainSlotIdForPiece(api, role, idx) {
             const q = arr[k];
             if (q && q.type === piece.type && norm(rbEffVstPath(q)) === want) dupSkip++;
         }
-        let seen = 0, chainIdx = -1;
-        for (let i = 0; i < chain.length; i++) {
-            const st = chain[i];
-            if (!st || Number(st.type) !== 0) continue;   // VST stages only
-            const slot = typeof st.slot === 'string' ? st.slot : '';
-            const isMasterStage = role === 'default'
-                ? slot === slotPrefix
-                : slot.indexOf(slotPrefix) === 0;
-            if (!isMasterStage) continue;
-            if (st.rs_gear != null && piece.type != null && st.rs_gear !== piece.type) continue;
-            if (!st.path || norm(st.path) !== want) continue;
-            if (seen++ < dupSkip) continue;
-            chainIdx = i; break;
-        }
-        rbDebugLog('slotIdForPiece', { role, idx, chainLen: chain.length, chainIdx,
-            want: want.split(/[\/]/).pop() });
-        if (chainIdx < 0) return null;
         const loaded = await api.getChainState();
-        if (!Array.isArray(loaded) || !loaded.length) return null;
-        // Same alignment as the mega-chain's _indexToSlotId capture: when the
-        // engine reports more slots than the spec, the freshly loaded chain
-        // is the most recent `chain.length` slots.
-        const relevant = loaded.length > chain.length
-            ? loaded.slice(loaded.length - chain.length) : loaded;
-        if (chainIdx >= relevant.length) return null;
-        const slot = relevant[chainIdx];
-        if (!slot || Number(slot.type) !== 0) return null;
-        // Guard against a stale spec vs. a reloaded engine chain: the slot at
-        // the mapped index must be the very plugin this piece plays.
-        if (slot.path && norm(slot.path) !== want) return null;
-        return slot.id != null ? slot.id : (slot.slotId != null ? slot.slotId : chainIdx);
+        if (!Array.isArray(loaded) || !loaded.length) {
+            rbDebugLog('slotIdForPiece', { role, idx, stage: 'noLiveChain', want: wantName });
+            return null;
+        }
+        const slotIdOf = (slot) => slot.id != null ? slot.id : (slot.slotId != null ? slot.slotId : null);
+
+        // ── Path 1: spec-based match (most precise when spec↔engine align) ──
+        // The last chain load's spec tags master stages ("master_post:<slot>"
+        // etc.) and the engine's loaded slots are index-aligned with it. A
+        // stale or misaligned spec must NOT hand out a wrong slot: the slot at
+        // the mapped index is cross-checked (type + path), and any mismatch
+        // falls through to the direct match below instead of returning null.
+        const chain = rbState._rbLastChainSpec;
+        if (Array.isArray(chain) && chain.length) {
+            let seen = 0, chainIdx = -1;
+            for (let i = 0; i < chain.length; i++) {
+                const st = chain[i];
+                if (!st || Number(st.type) !== 0) continue;   // VST stages only
+                const slot = typeof st.slot === 'string' ? st.slot : '';
+                const isMasterStage = role === 'default'
+                    ? slot === slotPrefix
+                    : slot.indexOf(slotPrefix) === 0;
+                if (!isMasterStage) continue;
+                if (st.rs_gear != null && piece.type != null && st.rs_gear !== piece.type) continue;
+                if (!st.path || norm(st.path) !== want) continue;
+                if (seen++ < dupSkip) continue;
+                chainIdx = i; break;
+            }
+            if (chainIdx >= 0) {
+                // Same alignment as the mega-chain's _indexToSlotId capture:
+                // when the engine reports more slots than the spec, the freshly
+                // loaded chain is the most recent `chain.length` slots.
+                const relevant = loaded.length > chain.length
+                    ? loaded.slice(loaded.length - chain.length) : loaded;
+                const slot = chainIdx < relevant.length ? relevant[chainIdx] : null;
+                if (slot && Number(slot.type) === 0 && (!slot.path || norm(slot.path) === want)) {
+                    const id = slotIdOf(slot);
+                    rbDebugLog('slotIdForPiece', { role, idx, stage: 'spec', slotId: id,
+                        chainLen: chain.length, chainIdx, loaded: loaded.length, want: wantName });
+                    return id;
+                }
+                rbDebugLog('slotIdForPiece', { role, idx, stage: 'specMiss',
+                    chainLen: chain.length, chainIdx, loaded: loaded.length, want: wantName,
+                    slotType: slot ? Number(slot.type) : null,
+                    slotPath: slot && slot.path ? norm(slot.path).split(/[\/]/).pop() : null });
+            } else {
+                rbDebugLog('slotIdForPiece', { role, idx, stage: 'specNoStage',
+                    chainLen: chain.length, want: wantName });
+            }
+        } else {
+            rbDebugLog('slotIdForPiece', { role, idx, stage: 'noSpec', want: wantName });
+        }
+
+        // ── Path 2: DIRECT live-chain match (immune to spec↔engine drift) ──
+        // The engine slots carry type + path. Via the audio-effects plan they
+        // also carry name = "<role>-<kind>" ("master-post-vst" /
+        // "master-pre-vst"), which tags master stages unambiguously even when
+        // the spec is stale or the index alignment shifted. Prefer tagged
+        // slots when any exist; otherwise accept any path-matching VST slot
+        // (last resort — a tone using the same VST could collide, but only
+        // when no tag exists at all).
+        const namePrefix = role === 'pre' ? 'master-pre-'
+            : role === 'post' ? 'master-post-'
+            : null;
+        const candidates = [];
+        for (const slot of loaded) {
+            if (!slot || Number(slot.type) !== 0) continue;
+            if (!slot.path || norm(slot.path) !== want) continue;
+            candidates.push(slot);
+        }
+        const tagged = namePrefix
+            ? candidates.filter((s) => String(s.name || '').indexOf(namePrefix) === 0)
+            : [];
+        const pool = (namePrefix && tagged.length) ? tagged : candidates;
+        if (pool.length > dupSkip) {
+            const slot = pool[dupSkip];
+            let id = slotIdOf(slot);
+            if (id == null) id = loaded.indexOf(slot);   // engine index as last resort
+            rbDebugLog('slotIdForPiece', { role, idx, stage: 'direct', slotId: id,
+                pool: pool.length, tagged: tagged.length, dupSkip,
+                name: String(slot.name || ''), want: wantName });
+            return id;
+        }
+        rbDebugLog('slotIdForPiece', { role, idx, stage: 'directMiss',
+            candidates: candidates.length, tagged: tagged.length, dupSkip, want: wantName });
+        return null;
     } catch (_) { return null; }
 }
 

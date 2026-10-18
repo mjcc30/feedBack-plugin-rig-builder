@@ -1489,6 +1489,18 @@ function rbEffVstPath(p)  { return p._vst_path || (p.assigned && p.assigned.vst_
 function rbEffVstFormat(p){ return p._vst_format || (p.assigned && p.assigned.vst_format) || 'VST3'; }
 function rbEffVstState(p) { return p._vst_state ?? (p.assigned && p.assigned.vst_state) ?? null; }
 
+// Fire-and-forget trace to the backend's rb-debug.log (diagnostics only —
+// never blocks, never alerts).
+function rbDebugLog(msg, data) {
+    try {
+        fetch(`${window.RB_API}/debug_log`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ msg, data: data === undefined ? null : data }),
+        }).catch(() => {});
+    } catch (_) {}
+}
+
 const RB_API = '/api/plugins/rig_builder';
 const RB_PLUGIN_ID = 'rig_builder';
 const RB_EFFECTS_PARTICIPANT_ID = 'rig_builder.effects';
@@ -10639,6 +10651,8 @@ async function rbMasterChainSlotIdForPiece(api, role, idx) {
             if (seen++ < dupSkip) continue;
             chainIdx = i; break;
         }
+        rbDebugLog('slotIdForPiece', { role, idx, chainLen: chain.length, chainIdx,
+            want: want.split(/[\/]/).pop() });
         if (chainIdx < 0) return null;
         const loaded = await api.getChainState();
         if (!Array.isArray(loaded) || !loaded.length) return null;
@@ -11869,6 +11883,7 @@ async function rbLoadMasterChain() {
         const data = await r.json();
         rbState.master.pre  = Array.isArray(data.pre)  ? data.pre  : [];
         rbState.master.post = Array.isArray(data.post) ? data.post : [];
+        rbDebugLog('loadMasterChain', { pre: rbState.master.pre.length, post: rbState.master.post.length });
         if (statusEl) {
             const n = rbState.master.pre.length + rbState.master.post.length;
             statusEl.textContent = n > 0
@@ -11876,6 +11891,7 @@ async function rbLoadMasterChain() {
                 : 'No master pieces configured yet — every song uses just its own chain.';
         }
     } catch (e) {
+        rbDebugLog('loadMasterChain error', { error: e.message || String(e) });
         if (statusEl) statusEl.textContent = `Failed to load master chain: ${e.message || e}`;
         rbState.master.pre = [];
         rbState.master.post = [];
@@ -12209,6 +12225,7 @@ async function rbMasterRemovePiece(role, idx) {
     const name = piece?.real_name || piece?.type || 'piece';
     if (!confirm(`Remove "${name}" from master ${role} chain?`)) return;
     arr.splice(idx, 1);
+    rbDebugLog('masterRemovePiece', { role, idx, count: arr.length });
     rbAfterMasterEdit(role);
 }
 
@@ -12217,21 +12234,15 @@ function rbMasterToggleBypass(role, idx, btn) {
     const p = arr[idx];
     if (!p) return;
     p._bypassed = !p._bypassed;
+    rbDebugLog('masterToggleBypass', { role, idx, bypassed: p._bypassed, count: arr.length });
     rbAfterMasterEdit(role);
 }
 
-async function rbAfterMasterEdit(role) {
-    await rbPersistMasterChain(role).catch(() => null);
-    rbRenderMasterChain(role);
-    if (role === 'default') {
-        // Refresh the editor's status line + reload live if it's the idle sound.
-        const statusEl = document.getElementById('rb-default-tone-status');
-        if (statusEl) statusEl.textContent = rbState.master.default.length
-            ? `${rbState.master.default.length} piece(s).`
-            : 'No pieces yet — use ＋ Add piece to build your idle rig.';
-        if (rbState._defaultToneActive) await rbReloadDefaultTone().catch(() => {});
-        return;
-    }
+// Reload whatever is actually playing so a master-chain edit is heard live.
+// Shared by rbAfterMasterEdit (after a save) and rbMasterEditVst (before
+// falling back to the muting standalone editor — retry the in-chain match
+// against a fresh spec first).
+async function rbRebuildActiveChainForMasterEdit() {
     // If a tone preview is running, reload it so the new master wrap is heard live.
     if (rbState.listeningTone !== null && rbState._previewPayload?.id) {
         await rbReloadPreview(rbState._previewPayload.id).catch(() => {});
@@ -12256,7 +12267,24 @@ async function rbAfterMasterEdit(role) {
     }
 }
 
+async function rbAfterMasterEdit(role) {
+    rbDebugLog('afterMasterEdit', { role, count: (rbState.master[role] || []).length });
+    await rbPersistMasterChain(role).catch(() => null);
+    rbRenderMasterChain(role);
+    if (role === 'default') {
+        // Refresh the editor's status line + reload live if it's the idle sound.
+        const statusEl = document.getElementById('rb-default-tone-status');
+        if (statusEl) statusEl.textContent = rbState.master.default.length
+            ? `${rbState.master.default.length} piece(s).`
+            : 'No pieces yet — use ＋ Add piece to build your idle rig.';
+        if (rbState._defaultToneActive) await rbReloadDefaultTone().catch(() => {});
+        return;
+    }
+    await rbRebuildActiveChainForMasterEdit().catch(() => {});
+}
+
 async function rbPersistMasterChain(role) {
+    rbDebugLog('persistMasterChain enter', { role, count: (rbState.master[role] || []).length });
     const arr = rbState.master[role] || [];
     const pieces = arr.map(p => {
         const fc = rbFullChainPayloadPiece(p);
@@ -12295,19 +12323,28 @@ async function rbPersistMasterChain(role) {
     const url  = isDefault ? `${window.RB_API}/default_tone/save` : `${window.RB_API}/master_chain/save`;
     const body = isDefault ? { pieces } : { role, pieces };
     const what = isDefault ? 'default tone' : `master ${role}`;
+    rbDebugLog('persistMasterChain', {
+        role, count: arr.length,
+        pieces: pieces.map(p => ({ slot: p.slot, gear: p.rs_gear_type, kind: p.kind,
+            vst: (p.vst_path || '').split(/[\/]/).pop(), file: p.file })),
+    });
     try {
         const r = await fetch(url, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(body),
         });
+        rbDebugLog('persistMasterChain http', { role, status: r.status });
         if (!r.ok) {
             const err = await r.json().catch(() => ({}));
             alert(`Save ${what} failed: ${err.error || r.status}`);
             return null;
         }
-        return await r.json();
+        const respJson = await r.json();
+        rbDebugLog('persistMasterChain ok', { role, resp: respJson });
+        return respJson;
     } catch (e) {
+        rbDebugLog('persistMasterChain error', { role, error: e.message || String(e) });
         alert(`Save ${what} failed: ${e.message || e}`);
         return null;
     }
@@ -12379,6 +12416,18 @@ async function rbMasterEditVst(role, idx) {
         // so e.g. a noise gate like ShutUp detects the master chain while
         // you tweak it.
         let slotId = await rbMasterChainSlotIdForPiece(api, role, idx);
+        rbDebugLog('masterEditVst slotMatch', { role, idx, slotId,
+            specLen: Array.isArray(rbState._rbLastChainSpec) ? rbState._rbLastChainSpec.length : -1 });
+        if (slotId == null) {
+            // The live spec may predate this piece's save (or the chain was
+            // loaded before it). Rebuild the active chain ONCE and retry: an
+            // in-chain editor keeps the rig playing; the standalone fallback
+            // mutes everything until the editor is closed.
+            rbDebugLog('masterEditVst rebuild+retry', { role, idx });
+            await rbRebuildActiveChainForMasterEdit().catch(() => {});
+            slotId = await rbMasterChainSlotIdForPiece(api, role, idx);
+            rbDebugLog('masterEditVst slotMatch retry', { role, idx, slotId });
+        }
         if (slotId != null) {
             rbState._vstEditorSlot = slotId;
             rbState._vstEditorInChain = true;
@@ -12390,6 +12439,7 @@ async function rbMasterEditVst(role, idx) {
             // Fallback (no live chain / piece not found in it): isolated
             // single-VST editor. This owns + clears the chain -- muted until
             // closed; rbRebuildChainAfterEditorSession then restores the rig.
+            rbDebugLog('masterEditVst standalone', { role, idx, vst: vstPath.split(/[\/]/).pop() });
             slotId = await rbSafeLoadStandaloneVst(api, vstPath);
             if (slotId == null || slotId < 0) {
                 editor.innerHTML = `<div class="text-xs text-red-400">${rbEsc(rbVstRefusedMsg())}</div>`;
@@ -12609,6 +12659,7 @@ function rbDebouncedMasterSave(role) {
 // fired, losing the edit, or (b) let a late timer fire AFTER the re-fetch and
 // overwrite the DB with the freshly-reloaded plugin's DEFAULT values.
 async function rbFlushMasterSaves() {
+    rbDebugLog('flushMasterSaves', { slot: rbState._vstEditorSlot });
     const slot = rbState._vstEditorSlot;
     // Roles with a debounced save still pending (canvas/slider edits) — cancel the
     // timer and mark the role to persist now.
@@ -12640,6 +12691,7 @@ async function rbMasterCaptureVstState(role, idx) {
     const api = rbAudioApi();
     const piece = rbState.master[role][idx];
     if (!piece) return;
+    rbDebugLog('masterCaptureVstState', { role, idx });
     const editor = document.getElementById(`rb-master-${role}-editor-${idx}`);
     try {
         // Snapshot the live values (preferred over the staged dict because
@@ -12850,10 +12902,46 @@ function rbMasterAddPiece(role, rsGearType, category) {
     };
     rbAttachCustomSource(piece, catalogEntry);
     rbState.master[role].push(piece);
+    rbDebugLog('masterAddPiece', { role, gear: rsGearType, count: rbState.master[role].length });
+    // Inherit the gear's global assignment so the piece plays + shows as
+    // assigned right away — a bare gear piece would otherwise sit unassigned
+    // and be skipped by the chain builder until a manual Assign.
+    rbResolveMasterPieceSource(role, rbState.master[role].length - 1).catch(() => {});
     // Close picker.
     const picker = document.getElementById(`rb-master-${role}-picker`);
     if (picker) { picker.classList.add('hidden'); picker.innerHTML = ''; }
     rbAfterMasterEdit(role);
+}
+
+// Fetch the gear's current global assignment and attach it to a freshly
+// added master piece (mirrors rbAttachCustomSource for custom gear). Lets the
+// piece play + display immediately; no-op when the gear has no assignment or
+// the piece already carries a source.
+async function rbResolveMasterPieceSource(role, idx) {
+    const p = rbState.master[role] && rbState.master[role][idx];
+    if (!p || rbEffVstPath(p) || rbEffFile(p)) return;
+    try {
+        const r = await fetch(`${window.RB_API}/gear_source/${encodeURIComponent(p.type)}`);
+        if (!r.ok) return;
+        const src = await r.json();
+        if (!src || !src.resolved) return;
+        if (src.kind === 'vst' && src.vst_path) {
+            p._vst_path = src.vst_path;
+            p._vst_format = src.vst_format || 'VST3';
+            p._vst_kind = 'vst';
+            if (src.vst_state) p._vst_state = src.vst_state;
+        } else if ((src.kind === 'nam' || src.kind === 'ir' || src.kind === 'rs_ir') && src.file) {
+            p._uploaded_file = src.file;
+            p._uploaded_kind = src.kind === 'rs_ir' ? 'ir' : src.kind;
+        } else {
+            return;
+        }
+        rbDebugLog('masterPieceSourceResolved', { role, idx, gear: p.type, kind: src.kind,
+            vst: (src.vst_path || '').split(/[\/]/).pop(), file: src.file });
+        // Persist the resolved source so the row is complete, then refresh the tile.
+        await rbPersistMasterChain(role).catch(() => null);
+        rbRenderMasterChain(role);
+    } catch (_) {}
 }
 
 // ── Master Assign picker (per-piece NAM library / VST file) ──
@@ -12966,6 +13054,7 @@ async function rbMasterAssignVstPath(role, idx, path) {
     if (!path) return;
     const p = rbState.master[role][idx];
     if (!p) return;
+    rbDebugLog('masterAssignVstPath', { role, idx, vst: path.split(/[\/]/).pop() });
     const fmt = path.toLowerCase().endsWith('.component') ? 'AudioUnit' : 'VST3';
     p._vst_path = path;
     p._vst_format = fmt;
@@ -21769,7 +21858,7 @@ async function rbAdvOnPanInput(id, val) {
 // Dev-only stereo/routing trace, mirrored to the backend relay ([python:stdout]
 // [rb-debug]). OFF by default — enable with `window.RB_DEBUG = true` or
 // localStorage 'rbDebug' when diagnosing parallel/pan routing.
-function rbDebugLog(msg) {
+function rbStereoDebugLog(msg) {
     try { if (!(window.RB_DEBUG || localStorage.getItem('rbDebug'))) return; } catch (_) { return; }
     try { console.log('[rb-stereo]', msg); } catch (_) {}
     try {
@@ -21786,9 +21875,9 @@ async function rbStudioApplyStereoToEngine() {
     const hasPan = typeof audio.setPan === 'function';
     const hasBranch = typeof audio.setBranch === 'function';
     const hasBranchSrc = typeof audio.setBranchSrc === 'function';
-    if (!hasPan && !hasBranch) { rbDebugLog('stereo: engine has NO setPan/setBranch API'); return; }
+    if (!hasPan && !hasBranch) { rbStereoDebugLog('stereo: engine has NO setPan/setBranch API'); return; }
     const chain = rbStudioCurrentChain();
-    if (!Array.isArray(chain) || !chain.length) { rbDebugLog('stereo: empty chain, nothing to route'); return; }
+    if (!Array.isArray(chain) || !chain.length) { rbStereoDebugLog('stereo: empty chain, nothing to route'); return; }
     let ampIdxs = [];
     try { ampIdxs = (rbStudioGroupDefault().amp || []).map(e => e.idx); } catch (_) { ampIdxs = []; }
     // Branch rule: ONLY the amps split (n-th amp → branch n). The shared cab,
@@ -21903,7 +21992,7 @@ async function rbStudioApplyStereoToEngine() {
                 for (let k = lo; k <= hi && ok; k++) if (!trial.has(ids[k])) ok = false;
             }
             if (ok) for (const [sid, b] of cabClaims) branchOfSlot.set(sid, b);
-            else rbDebugLog('per-amp cabs skipped: an unclaimed trunk slot sits inside the branch region');
+            else rbStereoDebugLog('per-amp cabs skipped: an unclaimed trunk slot sits inside the branch region');
         }
     }
     if (hasBranch) {
@@ -21940,8 +22029,8 @@ async function rbStudioApplyStereoToEngine() {
             const g = (typeof s.postGain === 'number' && s.postGain !== 1) ? ` g=${s.postGain.toFixed(3)}` : '';
             return `#${k} id=${s.id} ${nm} b=${s.branch | 0} pan=${Number(s.pan || 0).toFixed(2)}${g}${s.bypassed ? ' BYP' : ''}`;
         }).join('  |  ');
-        rbDebugLog(`amps@${JSON.stringify(ampIdxs)} claims=${JSON.stringify([...branchOfSlot.entries()])} engine: ${summary}`);
-    } catch (e) { rbDebugLog('readback failed: ' + e); }
+        rbStereoDebugLog(`amps@${JSON.stringify(ampIdxs)} claims=${JSON.stringify([...branchOfSlot.entries()])} engine: ${summary}`);
+    } catch (e) { rbStereoDebugLog('readback failed: ' + e); }
 }
 
 // Make the node GRAPH actually gate the audio:

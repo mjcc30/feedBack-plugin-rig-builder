@@ -1,5 +1,30 @@
 // NAM Rig Builder plugin — the game tone → NAM preset mapping UI.
 
+// ── Top-level crash capture ─────────────────────────────────────────────────
+// If this file's top-level evaluation aborts (an uncaught throw anywhere
+// below), every let/const declared after the throw point stays in the
+// temporal dead zone and every handler registered after it is dead — which
+// is exactly how "Rig Tones On does nothing" and the
+// "Cannot access '_rbPreloadPollTimer' before initialization" alert happen.
+// Capture the primary exception (this file only) so the next launch can show
+// it instead of failing silently. Installed before any other code runs.
+try {
+    window.addEventListener('error', function (ev) {
+        try {
+            if (!ev || !ev.filename || String(ev.filename).indexOf('rig_builder/screen.js') === -1) return;
+            var err = ev.error;
+            localStorage.setItem('rb-last-toplevel-error', JSON.stringify({
+                message: (err && err.message) || String(ev.message || ''),
+                source: String(ev.filename || ''),
+                line: (ev && ev.lineno) || 0,
+                col: (ev && ev.colno) || 0,
+                stack: (err && err.stack) || '',
+                at: Date.now(),
+            }));
+        } catch (_) { /* storage full/blocked — ignore */ }
+    });
+} catch (_) { /* ignore */ }
+
 // ── Desktop-bridge back-compat ──────────────────────────────────────────────
 // The host renamed window.slopsmithDesktop → window.feedBackDesktop
 // (got-feedback/feedBack-desktop#40). On desktop builds that still expose only
@@ -3755,6 +3780,24 @@ const RbMegaChain = (function () {
     return api;
 })();
 
+// Surface the top-level exception captured at the top of this file (if any).
+// Shown when a feature that depends on post-abort state is used, so the user
+// gets an actionable message instead of a silently dead button.
+function rbShowTopLevelErrorNotice() {
+    let captured = '';
+    try { captured = localStorage.getItem('rb-last-toplevel-error') || ''; } catch (_) { captured = ''; }
+    if (captured) {
+        let parsed = null;
+        try { parsed = JSON.parse(captured); } catch (_) { parsed = null; }
+        const where = parsed && parsed.source
+            ? ` (${String(parsed.source).replace(/^.*\/(?=[^\/]*$)/, '')}:${parsed.line})`
+            : '';
+        alert(`Rig Builder failed to initialise${where}:\n\n${(parsed && parsed.message) || captured}\n\nReload the app and open Rig Builder again — if it still fails, report this message.`);
+        return;
+    }
+    alert('Rig Builder failed to initialise. Reload the app and open Rig Builder again — if it still fails, report this.');
+}
+
 function rbInjectPlayerToneButton() {
     const controls = document.getElementById('player-controls');
     if (!controls) return;
@@ -3784,6 +3827,11 @@ function rbInjectPlayerToneButton() {
         try {
             if (window.RbMegaChain && typeof window.RbMegaChain.toggleEnabled === 'function') {
                 await window.RbMegaChain.toggleEnabled();
+            } else {
+                // The mega-chain IIFE never ran — the top-level aborted before
+                // it (see the crash capture at the top of this file). Surface
+                // the captured exception instead of failing silently.
+                rbShowTopLevelErrorNotice();
             }
         } finally {
             btn.disabled = false;
@@ -3798,6 +3846,14 @@ function rbInjectPlayerToneButton() {
 function rbUpdatePlayerToneButton() {
     const btn = document.getElementById('btn-rig-tones');
     if (!btn) return;
+    if (!window.RbMegaChain) {
+        // Top-level aborted before the mega-chain IIFE — say so instead of
+        // showing a dead "Rig Tones Off" button.
+        btn.textContent = 'Rig Tones Unavailable';
+        btn.title = 'Rig Builder failed to initialise. Click for the captured error, then reload the app.';
+        btn.className = 'px-3 py-1.5 bg-red-700/50 hover:bg-red-700/70 rounded-lg text-xs text-red-100 transition';
+        return;
+    }
     const state = window.RbMegaChain && typeof window.RbMegaChain.state === 'function'
         ? window.RbMegaChain.state()
         : { active: false, pending: false, failed: false, error: '', enabled: false, activeToneKey: '' };
@@ -8959,7 +9015,12 @@ async function rbDownloadTone3000Gears() {
 // backend's /preload_status every 500ms while a run is in flight,
 // stops automatically when `running` flips to false, and surfaces the
 // final summary in an alert.
-let _rbPreloadPollTimer = null;
+// `var`, not `let`: if the top-level ever aborts before this line, a `let`
+// would leave the binding in the temporal dead zone and every hoisted caller
+// (rbPreloadStartPolling, rbDownloadTone3000Gears…) would throw "Cannot access
+// '_rbPreloadPollTimer' before initialization". `var` is hoisted AND
+// initialised to undefined, so the polling still works after an abort.
+var _rbPreloadPollTimer = null;
 
 function rbPreloadStartPolling() {
     if (_rbPreloadPollTimer) return;   // already polling

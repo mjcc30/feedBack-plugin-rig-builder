@@ -12204,6 +12204,12 @@ def setup(app, context):
                     for p in files:
                         if p.name.startswith("."):
                             continue
+                        if p.name == "_rb_unit_impulse.wav":
+                            # rig_builder-internal identity IR (amp-trim
+                            # gain stage, see _unit_impulse_ir_path) — a
+                            # runtime artifact, not user content. Never
+                            # listed so it can't show up as an "orphan".
+                            continue
                         rel = f"{entry.name}/{p.name}"
                         bucket = _bucket_for(rel, p, kind, entry.name)
                         b = result.setdefault(bucket, {"files": []})

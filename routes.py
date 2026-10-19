@@ -861,6 +861,39 @@ def _get_conn_locked() -> sqlite3.Connection:
         _conn = sqlite3.connect(_require_db_path(), check_same_thread=False)
         _conn.execute("PRAGMA journal_mode=WAL")
         _conn.execute("PRAGMA foreign_keys=ON")
+        # nam_tone owns `presets`/`tone_mappings` but creates them lazily on
+        # its first request. rig_builder reads/writes both (batch mapping,
+        # chain persistence), so on a fresh profile — where no nam_tone
+        # endpoint has been hit yet — those tables would not exist and the
+        # first query would crash with "no such table". Create them here
+        # with the exact nam_tone schema; CREATE TABLE IF NOT EXISTS keeps
+        # this idempotent and nam_tone's own creation a no-op.
+        _conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS presets (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE,
+                model_file TEXT,
+                ir_file TEXT,
+                input_gain REAL NOT NULL DEFAULT 1.0,
+                output_gain REAL NOT NULL DEFAULT 0.5,
+                gate_threshold REAL NOT NULL DEFAULT -60.0,
+                settings_json TEXT NOT NULL DEFAULT '{}'
+            )
+            """
+        )
+        _conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS tone_mappings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                filename TEXT NOT NULL,
+                tone_key TEXT NOT NULL,
+                preset_id INTEGER NOT NULL,
+                UNIQUE(filename, tone_key),
+                FOREIGN KEY (preset_id) REFERENCES presets(id)
+            )
+            """
+        )
         _conn.execute(
             """
             CREATE TABLE IF NOT EXISTS preset_pieces (
@@ -7597,9 +7630,9 @@ def _batch_worker(mode: str = "all", categories=None):
                     _batch_log(f"Restored {_rev} piece(s) onto their bundled VST")
             except Exception:
                 log.exception("bundled-VST restore (factory) step crashed")
-    except Exception:
+    except Exception as e:
         log.exception("batch worker crashed")
-        _batch_log("ERROR — see server log")
+        _batch_log(f"ERROR — {type(e).__name__}: {e} (details in server log)")
     finally:
         with _batch_lock:
             _batch_state["running"] = False

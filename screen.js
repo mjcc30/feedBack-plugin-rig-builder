@@ -3887,6 +3887,15 @@ function rbUpdatePlayerToneButton() {
 
 window.addEventListener('rig-builder:tones-state', () => rbInjectPlayerToneButton());
 
+// Tone-override state — declared HERE, not next to its Setup UI far below, so
+// that triggerBuild (reachable SYNCHRONOUSLY from the song-lifecycle hook
+// below via the currentSong catch-up, i.e. while this file is still
+// evaluating) never hits a temporal-dead-zone ReferenceError. A TDZ throw
+// there once aborted the whole top-level — killing tone selection, the
+// Rig Tones button and the preload polling. See the crash capture at the top
+// of this file.
+const rbToneOverride = { enabled: false, name: '' };
+
 // Hook into the slopsmith song lifecycle. `song:loaded` fires from
 // highway.js whenever the in-game player has fully loaded a CDLC.
 // `song:unloaded` doesn't appear to fire reliably across all builds, so
@@ -7490,10 +7499,17 @@ async function rbStudioFinishMonitorLoad(api, chain) {
 // tone or a saved Studio tone — instead of its own tone, reusing the proven
 // default-tone / saved-tone legacy load path. Persisted as tone_override_enabled
 // / tone_override_name in /settings.
-const rbToneOverride = { enabled: false, name: '' };
+// NOTE: rbToneOverride itself is declared near the top of this file (just
+// before the song-lifecycle hook) — it MUST be initialised before any
+// synchronous triggerBuild call, or the top-level aborts on a TDZ error.
 let _rbOverrideLoadedKey = null;   // (songFile|toneName) the override last loaded
 
-function rbToneOverrideActive() { return !!rbToneOverride.enabled; }
+function rbToneOverrideActive() {
+    // Defensive: if this is ever reached before the declaration runs (a
+    // top-level abort, an event landing mid-evaluation), a TDZ
+    // ReferenceError here used to kill the whole plugin boot — fail closed.
+    try { return !!rbToneOverride.enabled; } catch (_) { return false; }
+}
 function rbResetOverrideLoaded() { _rbOverrideLoadedKey = null; }
 
 // Load the chosen override tone NOW. name '' = Default tone; otherwise a saved

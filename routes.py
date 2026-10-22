@@ -2924,6 +2924,35 @@ def _install_bundled_cab_irs() -> None:
         log.exception("bundled cab IR install failed")
 
 
+def _install_bundled_real_irs() -> None:
+    """Install bundled real (community-captured) cab IRs into
+    <config>/nam_irs/other/.
+
+    Ships community IRs under `<plugin>/assets/nam_irs/other/` and copies
+    any that are MISSING into the profile — never overwriting, so a user's
+    own IR is preserved. Runs once at `setup()`; no-op when either dir is
+    absent. See assets/nam_irs/other/ATTRIBUTION.md for sources/licences.
+    """
+    if not _config_dir:
+        return
+    src = Path(__file__).resolve().parent / "assets" / "nam_irs" / "other"
+    if not src.is_dir():
+        return
+    dst = _config_dir / "nam_irs" / "other"
+    try:
+        dst.mkdir(parents=True, exist_ok=True)
+        n = 0
+        for wav in sorted(src.glob("*.wav")):
+            target = dst / wav.name
+            if not target.exists():
+                shutil.copy2(wav, target)
+                n += 1
+        if n:
+            log.info("installed %d bundled real IR(s) into nam_irs/other", n)
+    except Exception:
+        log.exception("bundled real IR install failed")
+
+
 # ── NAM/IR storage layout — category subdirs ─────────────────────────
 #
 # Before v1.2 every downloaded NAM landed in `nam_models/` flat and every
@@ -8502,6 +8531,10 @@ def setup(app, context):
     # Install OUR bundled cab IRs into nam_irs/cabs so rb_cab_overrides
     # resolves on a fresh install (copies only missing files).
     _install_bundled_cab_irs()
+
+    # Install bundled real (community) cab IRs into nam_irs/other so a
+    # fresh install has real IRs without Rocksmith import or manual download.
+    _install_bundled_real_irs()
 
     # Start the background materialization watcher so songs played from
     # feedBack's main view (which only triggers cloud_loader to put the
